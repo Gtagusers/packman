@@ -2,68 +2,139 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Pacman Shooter - Game</title>
+  <title>Pacman Shooter – Powered Jump</title>
   <style>
-    body, html {
-      margin: 0;
-      padding: 0;
-      background-color: #000;
-      overflow: hidden;
-      height: 100%;
-    }
-
-    #gameCanvas {
-      display: block;
-      background-color: #111;
-      margin: 0 auto;
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-    }
-
-    .hud {
-      position: absolute;
-      top: 10px;
-      left: 10px;
-      color: #fff;
-      font-family: Arial, sans-serif;
-      font-size: 18px;
-      z-index: 10;
-    }
+    body, html { margin:0; padding:0; background:#000; overflow:hidden; height:100%; }
+    #gameCanvas { background:#111; display:block; margin:0 auto; position:absolute; top:0; left:0; right:0; bottom:0; }
+    .hud { position:absolute; top:10px; left:10px; z-index:10; color:#fff; font-family:sans-serif; }
+    .boost-icon { position:absolute; top:10px; right:10px; width:30px; height:30px; border-radius:50%; background:limegreen; box-shadow:0 0 10px limegreen; transition:opacity 0.3s; z-index:10; }
+    .boost-icon.cooling-down { background:gray; box-shadow:none; opacity:0.3; }
+    .power-bar { position:absolute; bottom:20px; left:50%; transform:translateX(-50%); width:200px; height:20px; background:#555; border:2px solid #888; border-radius:10px; overflow:hidden; z-index:10; }
+    .power-fill { width:0%; height:100%; background:cyan; transition:width 0s; }
   </style>
 </head>
 <body>
 
-  <div class="hud">
-    <span id="score">Score: 0</span>
-  </div>
-
+  <div class="hud"><span id="score">Score: 0</span></div>
+  <div class="boost-icon" id="boostIcon" title="Double Jump Ready"></div>
+  <div class="power-bar" id="powerBar"><div class="power-fill" id="powerFill"></div></div>
   <canvas id="gameCanvas" width="800" height="600"></canvas>
 
   <script>
-    const canvas = document.getElementById('gameCanvas');
-    const ctx = canvas.getContext('2d');
+  const canvas = document.getElementById('gameCanvas'), ctx = canvas.getContext('2d');
+  let lastTime = performance.now();
+  const keys = {};
+  document.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+  document.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 
-    // Example: simple Pacman circle
-    function drawPacman(x, y, radius, angle) {
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.arc(x, y, radius, angle, Math.PI * 2 - angle, false);
-      ctx.closePath();
-      ctx.fillStyle = 'yellow';
-      ctx.fill();
+  // Physics constants
+  const GRAVITY = 1500, MOVE_ACC = 2000, FRICTION = 0.85, MAX_SPEED = 400;
+  const BOUNCE_DAMP = 0.6, COYOTE_TIME = 0.1, JUMP_BUFFER = 0.1;
+  const BASE_JUMP_VEL = 600; // normal jump
+  const MAX_CHARGE = 1.5;   // seconds max charge
+  const AIR_CHARGE_HEIGHT = 50; // px above ground allowed to charge
+
+  let coyoteTimer = 0, jumpBufferTimer = 0;
+  let lastDouble = 0, dblCd = 1.0;
+  const boostIcon = document.getElementById('boostIcon');
+
+  const powerBar = document.getElementById('powerBar');
+  const powerFill = document.getElementById('powerFill');
+  let charging = false, chargeTime = 0;
+
+  const player = { x:400,y:100,vx:0,vy:0,r:25, onGround:false, stretch:1, squashT:0 };
+  const enemy = { x:100, y:100, r:20 };
+  let score = 0;
+
+  function squash() { player.squashT = 8; }
+  function detectCollision(a,b) { const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy < (a.r+b.r)**2; }
+
+  function update(dt) {
+    // timers
+    coyoteTimer = player.onGround ? COYOTE_TIME : Math.max(0, coyoteTimer - dt);
+    jumpBufferTimer = keys[' '] ? Math.min(JUMP_BUFFER, jumpBufferTimer + dt) : 0;
+
+    // check if near ground (for air charging)
+    const distToGround = canvas.height - (player.y + player.r);
+    const canAirCharge = distToGround <= AIR_CHARGE_HEIGHT;
+
+    // charge logic (on ground or just above it)
+    if (keys[' '] && (player.onGround || canAirCharge) && !charging && player.vy > 0) {
+      charging = true; chargeTime = 0;
+    }
+    if (charging) {
+      chargeTime = Math.min(MAX_CHARGE, chargeTime + dt);
+      powerFill.style.width = (chargeTime / MAX_CHARGE * 100) + '%';
+    }
+    // release charge
+    if (!keys[' '] && charging) {
+      // mega jump
+      player.vy = -BASE_JUMP_VEL * (1 + chargeTime / MAX_CHARGE * 1.5);
+      player.onGround = false;
+      charging = false;
+      chargeTime = 0;
+      powerFill.style.width = '0%';
+      squash();
     }
 
-    function gameLoop() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      drawPacman(400, 300, 30, 0.3);
-      requestAnimationFrame(gameLoop);
+    // horizontal acceleration
+    if (keys['a']) player.vx -= MOVE_ACC * dt;
+    if (keys['d']) player.vx += MOVE_ACC * dt;
+    player.vx = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, player.vx));
+    if (player.onGround && !keys['a'] && !keys['d']) player.vx *= FRICTION;
+
+    // buffered jump/double jump
+    if (jumpBufferTimer > 0) {
+      if (coyoteTimer > 0) {
+        player.vy = -BASE_JUMP_VEL;
+        player.onGround = false; coyoteTimer = 0; jumpBufferTimer = 0; squash();
+      } else if ((performance.now()/1000 - lastDouble) > dblCd && !player.onGround) {
+        player.vy = -BASE_JUMP_VEL;
+        lastDouble = performance.now()/1000; jumpBufferTimer = 0; squash();
+      }
     }
 
-    gameLoop();
+    // gravity & move
+    player.vy += GRAVITY * dt;
+    player.x += player.vx * dt; player.y += player.vy * dt;
+
+    // wall bounce
+    if (player.x - player.r < 0) { player.x = player.r; player.vx *= -BOUNCE_DAMP; squash(); }
+    if (player.x + player.r > canvas.width) { player.x = canvas.width - player.r; player.vx *= -BOUNCE_DAMP; squash(); }
+    // floor/ceiling
+    if (player.y + player.r > canvas.height) { player.y = canvas.height - player.r; player.vy *= -BOUNCE_DAMP; player.onGround = true; squash(); }
+    else player.onGround = false;
+    if (player.y - player.r < 0) { player.y = player.r; player.vy *= -BOUNCE_DAMP; squash(); }
+
+    // squash/stretch
+    if (player.squashT > 0) { const t=player.squashT/8; player.stretch = 1+0.4*Math.sin(t*Math.PI); player.squashT--; }
+    else player.stretch = 1;
+
+    // enemy collision
+    if (detectCollision(player, enemy)) {
+      score++; document.getElementById('score').innerText = 'Score: ' + score;
+      enemy.x = Math.random()*(canvas.width-40)+20;
+      enemy.y = Math.random()*(canvas.height-40)+20;
+    }
+    // update boost icon
+    boostIcon.classList.toggle('cooling-down', (performance.now()/1000 - lastDouble)<dblCd);
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.beginPath(); ctx.ellipse(player.x,player.y,player.r*player.stretch,player.r/player.stretch,0,0,Math.PI*2);
+    ctx.fillStyle='yellow'; ctx.fill();
+    ctx.beginPath(); ctx.arc(enemy.x,enemy.y,enemy.r,0,Math.PI*2);
+    ctx.fillStyle='red'; ctx.fill();
+  }
+
+  function loop(ts) {
+    const dt = (ts - lastTime)/1000;
+    lastTime = ts;
+    update(dt); draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
   </script>
-
 </body>
 </html>
